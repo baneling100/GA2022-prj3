@@ -2,32 +2,34 @@
 #include <cstdlib>
 #include <ctime>
 #include <cerrno>
+#include <cstring>
 
 #include <vector>
 #include <queue>
+#include <tuple>
 #include <algorithm>
 
 #define MAX_V 5000
-#define MAX_L 625  // L == (V + 7) / 8
 #define MAX_E 40000
 #define MOD 1000000007
 #define SPARE_TIME 1
 
-#define MAX_POPULATION 10240
-#define NUM_CHILDREN 256
+#define MAX_POPULATION 32768
+#define NUM_CHILDREN 1024
 #define CUTTING_POINT 2
-
-typedef std::pair<int, int> ipair;
+// #define NUM_LOCAL_OPT 10
 
 double starts_at;
 
-int V, L, E;
+int V, E;
 int edges[MAX_E][3];
-std::vector<int> vertices[MAX_V];  // only used while renumbering
+std::vector<int> vertices[MAX_V];
+std::vector<std::pair<int, int>> infos[MAX_V];
+std::priority_queue<std::pair<int, int>> Q;
 
 int hash_const;  // (2^V - 1) % MOD
 int renumber_cnt;
-bool visits[MAX_V];
+uint8_t visits[MAX_V];
 int degrees[MAX_V], renumbers[MAX_V], real_numbers[MAX_V];
 
 int get_complement(int hash) {
@@ -45,26 +47,30 @@ double get_time() {
 
 class chromosome {
 public:
-	unsigned char genes[MAX_L];
+	uint8_t genes[MAX_V];
+	int score = INT32_MAX;
 
-	chromosome(bool is_random = false) {
-		if (is_random)
-			for (int i = 0; i < L; i++)
-				genes[i] = rand() % 256;
+	chromosome(bool initialize = false) {
+		if (initialize)
+			for (int i = 0; i < V; i += 31) {
+				int rand_num = rand();  // 31-bits
+				int end = std::max(i + 31, V);
+				for (int j = i; j < end; j++) {
+					genes[j] = rand_num % 2;
+					rand_num >>= 1;
+				}
+			}
 	}
 
 	chromosome(chromosome *other) {
-		for (int i = 0; i < L; i++)
-			genes[i] = other->genes[i];
+		std::memcpy(genes, other->genes, V * sizeof(uint8_t));
 	}
 
-	// copy interval [left, (right + 7) / 8 * 8) from other to this
 	void get_interval(chromosome *other, int left, int right, bool flip) {
-		int pos1 = left / 8, pos2 = left % 8;
-		genes[pos1] = (genes[pos1] & ((1 << pos2) - 1))
-			    | ((flip ? ~other->genes[pos1] : other->genes[pos1]) & (255 << pos2));
-		for (int i = pos1 + 1; i <= (right - 1) / 8; i++)
-			genes[i] = (flip ? ~other->genes[i] : other->genes[i]);
+		std::memcpy(genes + left, other->genes + left, (right - left) * sizeof(uint8_t));
+		if (flip)
+			for (int i = left; i < right; i++)
+				genes[i] = 1 - genes[i];
 	}
 
 	chromosome *crossover(chromosome *other) {
@@ -73,7 +79,12 @@ public:
 		cp[CUTTING_POINT + 1] = V;
 		for (int i = 1; i <= CUTTING_POINT; i++)
 			cp[i] = rand() % V;
-		std::sort(cp + 1, cp + CUTTING_POINT + 1);
+		// std::sort(cp + 1, cp + CUTTING_POINT + 1);
+		if (cp[1] > cp[2]) {
+			int temp = cp[1];
+			cp[1] = cp[2];
+			cp[2] = temp;
+		}
 		// create empty chromosome and copy intervals from this and others
 		chromosome *child = new chromosome();
 		bool flip = rand() % 2;
@@ -82,28 +93,76 @@ public:
 		return child;
 	}
 
-	chromosome *mutation() {
-		chromosome *child = new chromosome(this);
+	chromosome *mutation(bool create) {
 		int idx = rand() % V;
-		child->genes[idx / 8] ^= 1 << (idx % 8);
-		return child;
+		if (create) {
+			chromosome *child = new chromosome(this);
+			child->genes[idx] = 1 - child->genes[idx];
+			return child;
+		} else {
+			genes[idx] = 1 - genes[idx];
+			return this;
+		}
+	}
+
+	chromosome *local_opt() {
+		std::memset(degrees, 0, V * sizeof(int));
+		score = 0;
+		for (int i = 0; i < E; i++) {
+			if (genes[edges[i][0]] != genes[edges[i][1]]) {
+				score += edges[i][2];
+				degrees[edges[i][0]] -= edges[i][2];
+				degrees[edges[i][1]] -= edges[i][2];
+			} else {
+				degrees[edges[i][0]] += edges[i][2];
+				degrees[edges[i][1]] += edges[i][2];
+			}
+		}
+		int before = score;
+		for (int i = 0; i < V; i++)
+			if (degrees[i] > 0)
+				Q.emplace(degrees[i], i);
+		// int cnt = 0;
+		while (!Q.empty()) {
+		// while (!Q.empty() && cnt < NUM_LOCAL_OPT) {
+			auto [diff, u] = Q.top();
+			Q.pop();
+			if (diff != degrees[u])
+				continue;
+			// cnt++;
+			score += diff;
+			for (auto [v, w] : infos[u]) {
+				if (genes[u] != genes[v]) {
+					degrees[u] += 2 * w;
+					degrees[v] += 2 * w;
+				} else {
+					degrees[u] -= 2 * w;
+					degrees[v] -= 2 * w;
+				}
+				if (degrees[v] > 0)
+					Q.emplace(degrees[v], v);
+			}
+			genes[u] = 1 - genes[u];
+			if (degrees[u] > 0)
+				Q.emplace(degrees[u], u);
+		}
+		return this;
 	}
 
 	int hash() const {
 		int result = 0;
-		for (int i = 0; i < L - 1; i++)
-			result = (256LL * result + genes[i]) % MOD;
-		result = (256LL * result + (genes[L - 1] & ((1 << ((V - 1) % 8 + 1)) - 1))) % MOD;
-		return std::min((int)result, get_complement((int)result));
+		for (int i = 0; i < V; i++)
+			result = ((result << 1) | genes[i]) % MOD;
+		return std::min(result, get_complement(result));
 	}
 
-	int evaluate() const {
-		for (int i = 0; i < V; i++)
-			visits[i] = genes[i / 8] >> (i % 8) & 1;
-		int score = 0;
-		for (int i = 0; i < E; i++)
-			if (visits[edges[i][0]] != visits[edges[i][1]])
-			    score += edges[i][2];
+	int evaluate() {
+		if (score == INT32_MAX) {
+			score = 0;
+			for (int i = 0; i < E; i++)
+				if (genes[edges[i][0]] != genes[edges[i][1]])
+					score += edges[i][2];
+		}
 		return score;
 	}
 };
@@ -193,7 +252,6 @@ void get_input() {
 	// get input
 	int u, v, w;
 	if (scanf("%d %d", &V, &E) != 2) exit(errno);
-	L = (V + 7) / 8;
 	for (int i = 0; i < E; i++) {
 		if (scanf("%d %d %d", &u, &v, &w) != 3) exit(errno);
 		// change from 1-base to 0-base
@@ -208,17 +266,14 @@ void get_input() {
 
 	// set hash constant (2^V - 1)
 	hash_const = 1;
-	for (int i = 0; i < V; i++) {
-		hash_const *= 2;
-		hash_const %= MOD;
-	}
-	hash_const += MOD - 1;
-	hash_const %= MOD;
+	for (int i = 0; i < V; i++)
+		hash_const = (hash_const << 1) % MOD;
+	hash_const = (hash_const + MOD - 1) % MOD;
 }
 
 void dfs(int u) {
 	if (visits[u]) return;
-	visits[u] = true;
+	visits[u] = 1;
 	renumbers[u] = renumber_cnt;
 	real_numbers[renumber_cnt] = u;
 	renumber_cnt++;
@@ -227,19 +282,17 @@ void dfs(int u) {
 }
 
 void renumber() {
-	std::priority_queue<ipair, std::vector<ipair>, std::greater<ipair>> Q;
-
 	Q.emplace(0, rand() % V);
 	while (!Q.empty()) {
 		int u = Q.top().second;
 		Q.pop();
 		if (visits[u]) continue;
-		visits[u] = true;
+		visits[u] = 1;
 		renumbers[u] = renumber_cnt++;
 		for (int v : vertices[u]) {
 			if (visits[v]) continue;
 			degrees[v]++;
-			Q.emplace(-degrees[v], v);
+			Q.emplace(degrees[v], v);
 		}
 	}
 	for (int i = 0; i < V; i++)
@@ -250,35 +303,44 @@ void renumber() {
 		);
 	// concerns: some vertices cannot be visited
 	// but seeming there is no such vertex, all seem to be connected
-	for (int i = 0; i < V; i++)
-		visits[i] = false;
+	std::memset(visits, 0, sizeof(visits));
 	renumber_cnt = 0;
 	for (int i = 0; i < V; i++)
 		dfs(i);
 	for (int i = 0; i < E; i++) {
 		edges[i][0] = renumbers[edges[i][0]];
 		edges[i][1] = renumbers[edges[i][1]];
+		infos[edges[i][0]].emplace_back(edges[i][1], edges[i][2]);
+		infos[edges[i][1]].emplace_back(edges[i][0], edges[i][2]);
 	}
 }
 
 void try_GA() {
 	group = population();
-	// int cnt = 0;
+	int cnt = 0;
 	do {
-		int num_crossover = NUM_CHILDREN / 4;
-		for (int i = 0; i < num_crossover; i++) {
+		// int num_crossover = NUM_CHILDREN / 4;
+		// int num_mutation = NUM_CHILDREN / 2;
+		// for (int i = 0; i < num_crossover; i++) {
+		// 	int x = rand() % group.num_chrs;
+		// 	int y = rand() % group.num_chrs;
+		// 	group.children[i] = group.chrs[x]->crossover(group.chrs[y])->local_opt();
+		// }
+		// for (int i = num_crossover; i < num_mutation; i++) {
+		// 	int x = rand() % group.num_chrs;
+		// 	group.children[i] = group.chrs[x]->mutation(true)->local_opt();
+		// }
+		for (int i = 0; i < NUM_CHILDREN; i++) {
 			int x = rand() % group.num_chrs;
 			int y = rand() % group.num_chrs;
-			group.children[i] = group.chrs[x]->crossover(group.chrs[y]);
-		}
-		for (int i = num_crossover; i < NUM_CHILDREN; i++) {
-			int x = rand() % group.num_chrs;
-			group.children[i] = group.chrs[x]->mutation();
+			group.children[i] = group.chrs[x]->crossover(group.chrs[y])  // always create new chromosome
+											 ->mutation(false)  // create new chromosome when flag is given
+											 ->local_opt();  // do not create new chromosome
 		}
 		group.replace();
-		// cnt++;
-		// if (cnt % 100 == 0)
-		// 	fprintf(stderr, "%d %d %lf\n", cnt, group.evals[0].score, get_time() - starts_at);
+		cnt++;
+		if (cnt % 100 == 0)
+			fprintf(stderr, "%d %d %lf\n", cnt, group.evals[0].score, get_time() - starts_at);
 	} while (get_time() - starts_at + SPARE_TIME < V / 6.0);
 }
 
@@ -286,7 +348,7 @@ void print_output() {
 	chromosome *best = group.evals[0].chr;
 
 	for (int i = 0; i < V; i++)
-		visits[real_numbers[i]] = (best->genes[i / 8] >> (i % 8)) & 1;
+		visits[real_numbers[i]] = best->genes[i];
 	for (int i = 0; i < V; i++)
 		if (visits[i])
 			printf("%d ", i + 1);

@@ -1,7 +1,7 @@
 all: ga
 
 ga: ga.cpp
-	g++ -o ga -O3 ga.cpp
+	g++ -std=c++17 -o ga -O3 ga.cpp
 
 run: ga
 	./ga < maxcut.in > maxcut.out

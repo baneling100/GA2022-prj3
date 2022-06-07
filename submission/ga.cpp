@@ -174,7 +174,7 @@ public:
 		hash = chr->hash();
 	}
 
-	bool operator<(const evaluation &other) {
+	bool operator<(const evaluation &other) const {
 		return score > other.score ||
 		       (score == other.score && hash < other.hash);
 	}
